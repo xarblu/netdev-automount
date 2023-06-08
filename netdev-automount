@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+
+import sys,os,re,subprocess,tomllib
+
+'''
+Automatically (un)mount network filesystems
+
+Uses mounts configured in /etc/fstab.
+
+If called directly check which hosts are reachable via ping.
+
+If called while residing in /{etc,usr/lib}/NetworkManager/dispatcher.d
+assume it is called as a dispatcher event.
+
+To use this feature configure hosts associated with connections in
+/etc/nm-netdev-automount.toml.
+
+<connection> is either UUID or NAME of the connection as given by "nmcli connection show".
+The first match will be used and UUID is preferred.
+
+Hosts are as configured in fstab.
+
+# [<connection>]  
+# hosts = [ 'host_1', 'host_2', 'host_3' ]
+'''
+
+# print message to stderr
+def err(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+# returns a list of tuples containing (host, mountpoint)
+def parse_fstab() -> list[tuple[str,str]]:
+    shares = list[tuple[str,str]]()
+    with open('/etc/fstab') as fstab:
+        for line in fstab:
+            # skip comments
+            if re.match(r'\s*#.*', line):
+                continue
+            # skip non network mounts 
+            # (assuming netshares are <host>:<share> <mountopts>)
+            if not re.match(r'.*?:.*?(?:\s+.*?){5}', line):
+                continue
+            host = re.sub(r'\s*(.*?):.*?\s+.*\n?', r'\1', line)
+            mountpoint = re.sub(r'\s*.*?:(.*?)\s+.*\n?', r'\1', line)
+            shares.append((host, mountpoint))
+    return shares
+
+# returns True if host is reachable
+def reachable(host: str) -> bool:
+    p = subprocess.run(['ping', '-c', '1', host], capture_output=True)
+    if p.returncode == 0:
+        return True
+    else:
+        return False
+
+# returns True if mountpoint already has a FS mounted
+def mounted(mountpoint: str) -> bool:
+    p = subprocess.run(['mountpoint', mountpoint], capture_output=True)
+    if p.returncode == 0:
+        return True
+    else:
+        return False
+
+# mount <mountpoints> print error on fail
+def mount(mountpoints: list[str]):
+    for mountpoint in mountpoints:
+        if not mounted(mountpoint):
+            p = subprocess.run(['mount', mountpoint], capture_output=True)
+            if p.returncode == 0:
+                print(f'Successfully mounted {mountpoint}')
+            else:
+                err(f'Failed mounting {mountpoint}')
+        else:
+            print(f'{mountpoint} already mounted')
+
+# unmount <mountpoints> print error on fail
+def umount(mountpoints: list[str]):
+    for mountpoint in mountpoints:
+        if mounted(mountpoint):
+            p = subprocess.run(['umount', '-lf', mountpoint], capture_output=True)
+            if p.returncode == 0:
+                print(f'Successfully unmounted {mountpoint}')
+            else:
+                err(f'Failed unmounting {mountpoint}')
+        else:
+            print(f'{mountpoint} not mounted')
+
+# returns True if ran from a valid NetworkManager/dispatcher.d
+def nm_dispatcher() -> bool:
+    if re.match(r'/(?:etc|usr/lib)/NetworkManager/dispatcher.d/.*', os.path.abspath(__file__)):
+        return True
+    else:
+        return False
+
+# returns list of hosts associated with NetworkManager <connection>
+def nm_dispatcher_hosts(connection: str) -> list[str] | None:
+    config_path = '/etc/nm-netdev-automount.toml'
+    with open(config_path, 'rb') as f:
+        config = tomllib.load(f)
+        if connection in config and 'hosts' in config[connection]:
+            if len(config[connection]['hosts']) > 0:
+                return config[connection]['hosts']
+            else:
+                print(f'No hosts configured for connection {connection}')
+                return None
+        else:
+            print(f'Connection {connection} is not configured in {config_path}')
+            return None
+
+# Events when running as NetworkManager dispatcher script
+def nm_dispatcher_events():
+    hosts = None
+    for connection in [os.environ.get('CONNECTION_UUID'), os.environ.get('CONNECTION_ID')]:
+        if connection:
+            hosts = nm_dispatcher_hosts(connection)
+            if hosts:
+                break
+    else:
+        exit()
+    
+    # (un)mount based on dispatched event and reachable status
+    if sys.argv[2] in ['up']:
+        mount([ x[1] for x in parse_fstab() if x[0] in hosts and reachable(x[0]) ])
+    elif sys.argv[2] in ['down', 'pre-down', 'vpn-pre-down']:
+        umount([ x[1] for x in parse_fstab() if x[0] in hosts and not reachable(x[0]) ])
+    exit()
+
+# Events when running directly
+def direct():
+    # (un)mount based on reachable status
+    mount([ x[1] for x in parse_fstab() if reachable(x[0]) ])
+    umount([ x[1] for x in parse_fstab() if not reachable(x[0]) ])
+    exit()
+
+# create default conf if it doesn't exist
+def init():
+    conf_path = '/etc/nm-netdev-automount.toml'
+    if not os.path.isfile(conf_path):
+        conf_default = """# Automatically (un)mount network filesystems via NetworkManager-dispatcher
+
+# Uses mounts configured in /etc/fstab.
+
+# <connection> is either UUID or NAME of the connection as given by "nmcli connection show".
+# The first match will be used and UUID is preferred.
+
+# Hosts are as configured in fstab.
+
+# [<connection>]  
+# hosts = [ 'host_1', 'host_2', 'host_3' ]
+"""
+        with open(conf_path, 'w') as conf:
+            conf.write(conf_default)
+
+def main():
+    init()
+    if nm_dispatcher():
+        nm_dispatcher_events()
+    else:
+        direct()
+
+if __name__ == '__main__':
+    main()
