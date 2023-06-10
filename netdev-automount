@@ -24,10 +24,6 @@ Hosts are as configured in fstab.
 # hosts = [ 'host_1', 'host_2', 'host_3' ]
 '''
 
-# print message to stderr
-def err(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
-
 # returns a list of tuples containing (host, mountpoint)
 def parse_fstab() -> list[tuple[str,str]]:
     shares = list[tuple[str,str]]()
@@ -40,15 +36,20 @@ def parse_fstab() -> list[tuple[str,str]]:
             # (assuming netshares are <host>:<share> <mountopts>)
             if not re.match(r'.*?:.*?(?:\s+.*?){5}', line):
                 continue
-            host = re.sub(r'\s*(.*?):.*?\s+.*\n?', r'\1', line)
-            mountpoint = re.sub(r'\s*.*?:(.*?)\s+.*\n?', r'\1', line)
+            host = re.sub(r'\s*(.*?):.*?\s+.*', r'\1', line.rstrip())
+            mountpoint = re.sub(r'\s*.*?:(.*?)\s+.*', r'\1', line.rstrip())
             shares.append((host, mountpoint))
     return shares
 
 # returns True if host is reachable
 def reachable(host: str) -> bool:
-    p = subprocess.run(['ping', '-c', '1', host], capture_output=True)
-    if p.returncode == 0:
+    # resolve host outide of ping because ping's resolver is slow
+    getent = subprocess.run(['getent', 'hosts', host], capture_output=True, text=True)
+    if getent.returncode != 0:
+        return False
+    ip = getent.stdout.split(' ')[0]
+    ping = subprocess.run(['ping', '-c1', ip], capture_output=True)
+    if ping.returncode == 0:
         return True
     else:
         return False
@@ -69,7 +70,7 @@ def mount(mountpoints: list[str]):
             if p.returncode == 0:
                 print(f'Successfully mounted {mountpoint}')
             else:
-                err(f'Failed mounting {mountpoint}')
+                print(f'Failed mounting {mountpoint}')
         else:
             print(f'{mountpoint} already mounted')
 
@@ -81,7 +82,7 @@ def umount(mountpoints: list[str]):
             if p.returncode == 0:
                 print(f'Successfully unmounted {mountpoint}')
             else:
-                err(f'Failed unmounting {mountpoint}')
+                print(f'Failed unmounting {mountpoint}')
         else:
             print(f'{mountpoint} not mounted')
 
@@ -119,9 +120,9 @@ def nm_dispatcher_events():
         exit()
     
     # (un)mount based on dispatched event and reachable status
-    if sys.argv[2] in ['up']:
+    if sys.argv[2] in ['up', 'vpn-up']:
         mount([ x[1] for x in parse_fstab() if x[0] in hosts and reachable(x[0]) ])
-    elif sys.argv[2] in ['down', 'pre-down', 'vpn-pre-down']:
+    elif sys.argv[2] in ['down', 'vpn-down']:
         umount([ x[1] for x in parse_fstab() if x[0] in hosts and not reachable(x[0]) ])
     exit()
 
