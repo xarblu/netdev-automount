@@ -119,11 +119,12 @@ def nm_dispatcher_events():
     else:
         exit()
     
-    # (un)mount based on dispatched event and reachable status
+    # mount based on dispatched event and reachable status
+    # unmount based only on dispatched event
     if sys.argv[2] in ['up', 'vpn-up']:
         mount([ x[1] for x in parse_fstab() if x[0] in hosts and reachable(x[0]) ])
-    elif sys.argv[2] in ['down', 'vpn-down']:
-        umount([ x[1] for x in parse_fstab() if x[0] in hosts and not reachable(x[0]) ])
+    elif sys.argv[2] in ['pre-down', 'down', 'vpn-pre-down', 'vpn-down']:
+        umount([ x[1] for x in parse_fstab() if x[0] in hosts])
     exit()
 
 # Events when running directly
