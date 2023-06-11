@@ -37,7 +37,7 @@ def parse_fstab() -> list[tuple[str,str]]:
             if not re.match(r'.*?:.*?(?:\s+.*?){5}', line):
                 continue
             host = re.sub(r'\s*(.*?):.*?\s+.*', r'\1', line.rstrip())
-            mountpoint = re.sub(r'\s*.*?:(.*?)\s+.*', r'\1', line.rstrip())
+            mountpoint = re.sub(r'\s*.*?\s+(.*?)\s+.*', r'\1', line.rstrip())
             shares.append((host, mountpoint))
     return shares
 
@@ -57,34 +57,37 @@ def reachable(host: str) -> bool:
 # returns True if mountpoint already has a FS mounted
 def mounted(mountpoint: str) -> bool:
     p = subprocess.run(['mountpoint', mountpoint], capture_output=True)
-    if p.returncode == 0:
-        return True
-    else:
-        return False
+    return p.returncode == 0
 
-# mount <mountpoints> print error on fail
-def mount(mountpoints: list[str]):
-    for mountpoint in mountpoints:
-        if not mounted(mountpoint):
-            p = subprocess.run(['mount', mountpoint], capture_output=True)
-            if p.returncode == 0:
-                print(f'Successfully mounted {mountpoint}')
-            else:
-                print(f'Failed mounting {mountpoint}')
+# mount <netmounts> if reachable
+def mount(netmounts: list[tuple[str,str]]):
+    for host,mount in netmounts:
+        if not reachable(host):
+            print(f'Host {host} not reachable. Not mounting {mount}')
+            return
+        if mounted(mount):
+            print(f'{mount} already mounted')
+            return
+        p = subprocess.run(['mount', mount], capture_output=True)
+        if p.returncode == 0:
+            print(f'Successfully mounted {mount} from {host}')
         else:
-            print(f'{mountpoint} already mounted')
+            print(f'Failed mounting {mount} from {host}')
 
-# unmount <mountpoints> print error on fail
-def umount(mountpoints: list[str]):
-    for mountpoint in mountpoints:
-        if mounted(mountpoint):
-            p = subprocess.run(['umount', '-lf', mountpoint], capture_output=True)
-            if p.returncode == 0:
-                print(f'Successfully unmounted {mountpoint}')
-            else:
-                print(f'Failed unmounting {mountpoint}')
+# unmount <netmounts> if unreachable
+def umount(netmounts: list[tuple[str,str]]):
+    for host,mount in netmounts:
+        if reachable(host):
+            print(f'Host {host} still reachable - Not unmounting {mount}')
+            return
+        if not mounted(mount):
+            print(f'{mount} already unmounted')
+            return
+        p = subprocess.run(['umount', '-lf', mount], capture_output=True)
+        if p.returncode == 0:
+            print(f'Successfully unmounted {mount} from {host}')
         else:
-            print(f'{mountpoint} not mounted')
+            print(f'Failed unmounting {mount} from {host}')
 
 # returns True if ran from a valid NetworkManager/dispatcher.d
 def nm_dispatcher() -> bool:
@@ -119,19 +122,17 @@ def nm_dispatcher_events():
     else:
         exit()
     
-    # mount based on dispatched event and reachable status
-    # unmount based only on dispatched event
+    # mount based on dispatched event
     if sys.argv[2] in ['up', 'vpn-up']:
-        mount([ x[1] for x in parse_fstab() if x[0] in hosts and reachable(x[0]) ])
+        mount([ x for x in parse_fstab() if x[0] in hosts ])
     elif sys.argv[2] in ['pre-down', 'down', 'vpn-pre-down', 'vpn-down']:
-        umount([ x[1] for x in parse_fstab() if x[0] in hosts])
+        umount([ x for x in parse_fstab() if x[0] in hosts ])
     exit()
 
 # Events when running directly
 def direct():
-    # (un)mount based on reachable status
-    mount([ x[1] for x in parse_fstab() if reachable(x[0]) ])
-    umount([ x[1] for x in parse_fstab() if not reachable(x[0]) ])
+    mount([ x for x in parse_fstab() ])
+    umount([ x for x in parse_fstab() ])
     exit()
 
 # create default conf if it doesn't exist
