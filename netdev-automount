@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import sys,os,re,subprocess,tomllib
+import sys,os,re,subprocess,tomllib,time
 
 '''
 Automatically (un)mount network filesystems
@@ -53,6 +53,18 @@ def reachable(host: str) -> bool:
         return True
     else:
         return False
+
+# get default gateway(ipv4)/next hop(ipv6) for iface
+# either returns ip if found or None
+def gateway(iface: str) -> str|None:
+    for ipv in ['6', '4']:
+        route = subprocess.run(['route', '-n', f'-{ipv}'], capture_output=True, text=True)
+        if route.returncode != 0:
+            return None
+        for line in route.stdout.splitlines():
+            route = re.split(r'\s+', line)
+            if iface in route and 'UG' in route:
+                return route[1]
 
 # returns True if mountpoint already has a FS mounted
 def mounted(mountpoint: str) -> bool:
@@ -123,7 +135,9 @@ def nm_dispatcher_events():
         exit()
     
     # mount based on dispatched event
+    # wait until the default gateway for interface is available
     if sys.argv[2] in ['up', 'vpn-up']:
+        while not gateway(sys.argv[1]) and not reachable(str(gateway(sys.argv[1]))): time.sleep(1)
         mount([ x for x in parse_fstab() if x[0] in hosts ])
     elif sys.argv[2] in ['pre-down', 'down', 'vpn-pre-down', 'vpn-down']:
         umount([ x for x in parse_fstab() if x[0] in hosts ])
