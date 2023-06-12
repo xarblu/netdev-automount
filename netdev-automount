@@ -77,9 +77,6 @@ def mounted(mountpoint: str) -> bool:
 # mount <netmounts> if reachable
 def mount(netmounts: list[tuple[str,str]]):
     for host,mount in netmounts:
-        if not reachable(host):
-            print(f'Host {host} not reachable. Not mounting {mount}')
-            return
         if mounted(mount):
             print(f'{mount} already mounted')
             return
@@ -92,20 +89,17 @@ def mount(netmounts: list[tuple[str,str]]):
 # unmount <netmounts> if unreachable
 def umount(netmounts: list[tuple[str,str]]):
     for host,mount in netmounts:
-        if reachable(host):
-            print(f'Host {host} still reachable - Not unmounting {mount}')
-            return
         if not mounted(mount):
             print(f'{mount} already unmounted')
             return
         # try to unmount clean first
-        for args in ['', '-f', '-lf']:
+        for args in [' ', '-f', '-lf']:
             p = subprocess.run(['timeout', '3', 'umount', args, mount], capture_output=True)
             if p.returncode == 0:
-                print(f'Successfully unmounted {mount} from {host}')
-                break
+                print(f'Successfully unmounted {mount} from {host} with args {args}')
+                return
             else:
-                print(f'Failed unmounting {mount} from {host}')
+                print(f'Failed unmounting {mount} from {host} with args {args}')
 
 # returns True if ran from a valid NetworkManager/dispatcher.d
 def nm_dispatcher() -> bool:
@@ -142,17 +136,20 @@ def nm_dispatcher_events():
     
     # mount based on dispatched event
     # wait until the default gateway for interface is available
+    # then retry 5 times with 3s delay
     if sys.argv[2] in ['up', 'vpn-up']:
         while not gateway(sys.argv[1]) and not reachable(str(gateway(sys.argv[1]))): time.sleep(1)
-        mount([ x for x in parse_fstab() if x[0] in hosts ])
+        for i in range(5):
+            mount([ x for x in parse_fstab() if x[0] in hosts and reachable(x[0]) ])
+            time.sleep(3)
     elif sys.argv[2] in ['pre-down', 'down', 'vpn-pre-down', 'vpn-down']:
         umount([ x for x in parse_fstab() if x[0] in hosts ])
     exit()
 
 # Events when running directly
 def direct():
-    mount([ x for x in parse_fstab() ])
-    umount([ x for x in parse_fstab() ])
+    mount([ x for x in parse_fstab() if reachable(x[0]) ])
+    umount([ x for x in parse_fstab() if not reachable(x[0]) ])
     exit()
 
 # create default conf if it doesn't exist
