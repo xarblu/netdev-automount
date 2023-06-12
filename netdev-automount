@@ -67,9 +67,12 @@ def gateway(iface: str) -> str|None:
                 return route[1]
 
 # returns True if mountpoint already has a FS mounted
+# if it doesn't finish within 3 seconds assume it's
+# a mounted but disconnected zombie netmount
 def mounted(mountpoint: str) -> bool:
-    p = subprocess.run(['mountpoint', mountpoint], capture_output=True)
-    return p.returncode == 0
+    p = subprocess.run(['timeout', '3', 'mountpoint', mountpoint], capture_output=True)
+    # 124 -> timeout
+    return p.returncode == 0 or p.returncode == 124
 
 # mount <netmounts> if reachable
 def mount(netmounts: list[tuple[str,str]]):
@@ -95,11 +98,14 @@ def umount(netmounts: list[tuple[str,str]]):
         if not mounted(mount):
             print(f'{mount} already unmounted')
             return
-        p = subprocess.run(['umount', '-lf', mount], capture_output=True)
-        if p.returncode == 0:
-            print(f'Successfully unmounted {mount} from {host}')
-        else:
-            print(f'Failed unmounting {mount} from {host}')
+        # try to unmount clean first
+        for args in ['', '-f', '-lf']:
+            p = subprocess.run(['timeout', '3', 'umount', args, mount], capture_output=True)
+            if p.returncode == 0:
+                print(f'Successfully unmounted {mount} from {host}')
+                break
+            else:
+                print(f'Failed unmounting {mount} from {host}')
 
 # returns True if ran from a valid NetworkManager/dispatcher.d
 def nm_dispatcher() -> bool:
