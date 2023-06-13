@@ -5,7 +5,7 @@ import os
 import re
 import subprocess
 import tomllib
-import time
+from time import sleep
 import concurrent.futures
 
 '''
@@ -30,7 +30,8 @@ Hosts are as configured in fstab.
 # hosts = [ 'host_1', 'host_2', 'host_3' ]
 '''
 
-# returns a list of tuples containing (host, mountpoint)
+# parse /etc/fstab for netmounts
+# @return - list of tuples containing (host, mountpoint)
 def parse_fstab() -> list[tuple[str,str]]:
     shares = list[tuple[str,str]]()
     with open('/etc/fstab') as fstab:
@@ -47,22 +48,35 @@ def parse_fstab() -> list[tuple[str,str]]:
             shares.append((host, mountpoint))
     return shares
 
-# returns True if host is reachable
-def reachable(host: str) -> bool:
-    # resolve host outide of ping because ping's resolver is slow
-    getent = subprocess.run(['getent', 'hosts', host], capture_output=True, text=True)
-    if getent.returncode != 0:
-        return False
-    ip = getent.stdout.split(' ')[0]
-    ping = subprocess.run(['ping', '-c1', ip], capture_output=True)
-    if ping.returncode == 0:
-        return True
+# check if host is reachable
+# retry 'tries' times waiting 3s between tries
+# @param host - host to check
+# @param tries - try check n times (default 1)
+# @return - True if reachable, else False
+def reachable(host: str, tries: int = 1) -> bool:
+    for t in range(1, tries):
+        if t > 1:
+            sleep(3)
+        try:
+            # resolve host outide of ping because ping's resolver is slow
+            getent = subprocess.run(['getent', 'hosts', host], capture_output=True, text=True, timeout=5)
+            if getent.returncode != 0:
+                continue
+            ip = getent.stdout.split(' ')[0]
+            ping = subprocess.run(['ping', '-c1', ip], capture_output=True, timeout=5)
+            if ping.returncode == 0:
+                return True
+            else:
+                continue
+        except subprocess.TimeoutExpired:
+            continue
     else:
         return False
 
-# returns True if mountpoint already has a FS mounted
-# if it doesn't finish within 3 seconds assume it's
-# a mounted but disconnected zombie netmount
+# check if mountpoint is mounted
+# assume timeout means unreachable zombie netmount
+# @param mountpoint - path to a local mountpoint
+# @return - True if mountpoint mounted or timeout, else False
 def mounted(mountpoint: str) -> bool:
     try:
         p = subprocess.run(['mountpoint', mountpoint], capture_output=True, timeout=5)
@@ -70,14 +84,18 @@ def mounted(mountpoint: str) -> bool:
     except subprocess.TimeoutExpired:
         return True
 
-# mount <netmounts> if reachable
-def mount(netmount: tuple[str,str]):
+# mount <netmounts>
+# @param netmount - tuple of (host, mount)
+# @param check_reachable - None disables check, int retries check n times (default 5 tries)
+def mount(netmount: tuple[str,str], check_reachable: None|int = 5) -> None:
     host,mount = netmount
     if mounted(mount):
         print(f'{mount} already mounted')
         return
+    if check_reachable and not reachable(host, check_reachable):
+        return
     try:
-        p = subprocess.run(['mount', mount], capture_output=True, )
+        p = subprocess.run(['mount', mount], capture_output=True, timeout=5)
         if p.returncode == 0:
             print(f'Successfully mounted {mount} from {host}')
         else:
@@ -85,11 +103,15 @@ def mount(netmount: tuple[str,str]):
     except subprocess.TimeoutExpired:
         print(f'Failed mounting {mount} from {host} - timeout reached')
 
-# unmount <netmounts> if unreachable
-def unmount(netmount: tuple[str,str]):
+# unmount <netmounts>
+# @param netmount - tuple of (host, mount)
+# @param check_reachable - None disables check, int retries check n times (default 1 try)
+def unmount(netmount: tuple[str,str], check_reachable: None|int = 1) -> None:
     host,mount = netmount
     if not mounted(mount):
         print(f'{mount} already unmounted')
+        return
+    if check_reachable and reachable(host, check_reachable):
         return
     # try to unmount clean first
     for args in [' ', '-f', '-lf']:
@@ -104,7 +126,9 @@ def unmount(netmount: tuple[str,str]):
             print(f'Failed unmounting {mount} from {host} with args {args} - timeout reached')
 
 # start parallel mountjobs
-def mounter(action: str, netmounts: list[tuple[str,str]]):
+# @param action - one of mount or unmount
+# @param netmounts - list of (host, mountpoint) tuples
+def mounter(action: str, netmounts: list[tuple[str,str]]) -> None:
     if action not in ['mount', 'unmount']:
         raise ValueError("action should be one of [mount, unmount]")
     mountjobs = concurrent.futures.ThreadPoolExecutor()
@@ -115,14 +139,16 @@ def mounter(action: str, netmounts: list[tuple[str,str]]):
             mountjobs.submit(unmount, netmount)
     mountjobs.shutdown(wait=True)
 
-# returns True if ran from a valid NetworkManager/dispatcher.d
+# check if NetworkManager-dispatcher
+# @return - True if ran from a valid NetworkManager/dispatcher.d, else False
 def nm_dispatcher() -> bool:
     if re.match(r'/(?:etc|usr/lib)/NetworkManager/dispatcher.d/.*', os.path.abspath(__file__)):
         return True
     else:
         return False
 
-# returns list of hosts associated with NetworkManager <connection>
+# parse configured hosts from /etc/nm-netdev-automount.tomle
+# @return - list of hosts associated with NetworkManager <connection>
 def nm_dispatcher_hosts(connection: str) -> list[str] | None:
     config_path = '/etc/nm-netdev-automount.toml'
     with open(config_path, 'rb') as f:
