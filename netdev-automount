@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 
-import sys,os,re,subprocess,tomllib,time
+import sys
+import os
+import re
+import subprocess
+import tomllib
+import time
+import concurrent.futures
 
 '''
 Automatically (un)mount network filesystems
@@ -70,36 +76,56 @@ def gateway(iface: str) -> str|None:
 # if it doesn't finish within 3 seconds assume it's
 # a mounted but disconnected zombie netmount
 def mounted(mountpoint: str) -> bool:
-    p = subprocess.run(['timeout', '3', 'mountpoint', mountpoint], capture_output=True)
-    # 124 -> timeout
-    return p.returncode == 0 or p.returncode == 124
+    try:
+        p = subprocess.run(['mountpoint', mountpoint], capture_output=True, timeout=5)
+        return p.returncode == 0
+    except subprocess.TimeoutExpired:
+        return True
 
 # mount <netmounts> if reachable
-def mount(netmounts: list[tuple[str,str]]):
-    for host,mount in netmounts:
-        if mounted(mount):
-            print(f'{mount} already mounted')
-            return
-        p = subprocess.run(['mount', mount], capture_output=True)
+def mount(netmount: tuple[str,str]):
+    host,mount = netmount
+    if mounted(mount):
+        print(f'{mount} already mounted')
+        return
+    try:
+        p = subprocess.run(['mount', mount], capture_output=True, )
         if p.returncode == 0:
             print(f'Successfully mounted {mount} from {host}')
         else:
-            print(f'Failed mounting {mount} from {host}')
+            print(f'Failed mounting {mount} from {host} - mount failed')
+    except subprocess.TimeoutExpired:
+        print(f'Failed mounting {mount} from {host} - timeout reached')
 
 # unmount <netmounts> if unreachable
-def umount(netmounts: list[tuple[str,str]]):
-    for host,mount in netmounts:
-        if not mounted(mount):
-            print(f'{mount} already unmounted')
-            return
-        # try to unmount clean first
-        for args in [' ', '-f', '-lf']:
-            p = subprocess.run(['timeout', '3', 'umount', args, mount], capture_output=True)
+def unmount(netmount: tuple[str,str]):
+    host,mount = netmount
+    if not mounted(mount):
+        print(f'{mount} already unmounted')
+        return
+    # try to unmount clean first
+    for args in [' ', '-f', '-lf']:
+        try:
+            p = subprocess.run(['umount', args, mount], capture_output=True, timeout=5)
             if p.returncode == 0:
                 print(f'Successfully unmounted {mount} from {host} with args {args}')
                 return
             else:
-                print(f'Failed unmounting {mount} from {host} with args {args}')
+                print(f'Failed unmounting {mount} from {host} with args {args} - umount failed')
+        except subprocess.TimeoutExpired:
+            print(f'Failed unmounting {mount} from {host} with args {args} - timeout reached')
+
+# start parallel mountjobs
+def mounter(action: str, netmounts: list[tuple[str,str]]):
+    if action not in ['mount', 'unmount']:
+        raise ValueError("action should be one of [mount, unmount]")
+    mountjobs = concurrent.futures.ThreadPoolExecutor()
+    for netmount in netmounts:
+        if action == 'mount':
+            mountjobs.submit(mount, netmount)
+        elif action == 'unmount':
+            mountjobs.submit(unmount, netmount)
+    mountjobs.shutdown(wait=True)
 
 # returns True if ran from a valid NetworkManager/dispatcher.d
 def nm_dispatcher() -> bool:
@@ -140,16 +166,16 @@ def nm_dispatcher_events():
     if sys.argv[2] in ['up', 'vpn-up']:
         while not gateway(sys.argv[1]) and not reachable(str(gateway(sys.argv[1]))): time.sleep(1)
         for i in range(5):
-            mount([ x for x in parse_fstab() if x[0] in hosts and reachable(x[0]) ])
+            mounter('mount', [x for x in parse_fstab() if x[0] in hosts])
             time.sleep(3)
     elif sys.argv[2] in ['pre-down', 'down', 'vpn-pre-down', 'vpn-down']:
-        umount([ x for x in parse_fstab() if x[0] in hosts ])
+        mounter('unmount', [x for x in parse_fstab() if x[0] in hosts])
     exit()
 
 # Events when running directly
 def direct():
-    mount([ x for x in parse_fstab() if reachable(x[0]) ])
-    umount([ x for x in parse_fstab() if not reachable(x[0]) ])
+    mounter('mount', [x for x in parse_fstab()])
+    mounter('unmount', [x for x in parse_fstab()])
     exit()
 
 # create default conf if it doesn't exist
