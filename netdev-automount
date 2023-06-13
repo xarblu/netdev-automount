@@ -114,9 +114,9 @@ def unmount(netmount: tuple[str,str], check_reachable: None|int = 1) -> None:
     if check_reachable and reachable(host, check_reachable):
         return
     # try to unmount clean first
-    for args in [' ', '-f', '-lf']:
+    for args in [(), ('-f'), ('-l', '-f')]:
         try:
-            p = subprocess.run(['umount', args, mount], capture_output=True, timeout=5)
+            p = subprocess.run(['umount', *args, mount], capture_output=True, timeout=5)
             if p.returncode == 0:
                 print(f'Successfully unmounted {mount} from {host} with args {args}')
                 return
