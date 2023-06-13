@@ -54,8 +54,8 @@ def parse_fstab() -> list[tuple[str,str]]:
 # @param tries - try check n times (default 1)
 # @return - True if reachable, else False
 def reachable(host: str, tries: int = 1) -> bool:
-    for t in range(1, tries):
-        if t > 1:
+    for t in range(tries):
+        if t > 0:
             sleep(3)
         try:
             # resolve host outide of ping because ping's resolver is slow
@@ -86,13 +86,14 @@ def mounted(mountpoint: str) -> bool:
 
 # mount <netmounts>
 # @param netmount - tuple of (host, mount)
-# @param check_reachable - None disables check, int retries check n times (default 5 tries)
-def mount(netmount: tuple[str,str], check_reachable: None|int = 5) -> None:
+# @param check_reachable - None disables check, int retries check n times (default disable)
+def mount(netmount: tuple[str,str], check_reachable: None|int) -> None:
     host,mount = netmount
     if mounted(mount):
         print(f'{mount} already mounted')
         return
     if check_reachable and not reachable(host, check_reachable):
+        print(f'{host} unreachable - not mounting')
         return
     try:
         p = subprocess.run(['mount', mount], capture_output=True, timeout=5)
@@ -105,13 +106,14 @@ def mount(netmount: tuple[str,str], check_reachable: None|int = 5) -> None:
 
 # unmount <netmounts>
 # @param netmount - tuple of (host, mount)
-# @param check_reachable - None disables check, int retries check n times (default 1 try)
-def unmount(netmount: tuple[str,str], check_reachable: None|int = 1) -> None:
+# @param check_reachable - None disables check, int retries check n times (default disable)
+def unmount(netmount: tuple[str,str], check_reachable: None|int) -> None:
     host,mount = netmount
     if not mounted(mount):
         print(f'{mount} already unmounted')
         return
     if check_reachable and reachable(host, check_reachable):
+        print(f'{host} reachable - not unmounting')
         return
     # try to unmount clean first
     for args in [(), ('-f'), ('-l', '-f')]:
@@ -128,15 +130,16 @@ def unmount(netmount: tuple[str,str], check_reachable: None|int = 1) -> None:
 # start parallel mountjobs
 # @param action - one of mount or unmount
 # @param netmounts - list of (host, mountpoint) tuples
-def mounter(action: str, netmounts: list[tuple[str,str]]) -> None:
+# @param check_reachable - None disables check, int retries check n times (default disable)
+def mounter(action: str, netmounts: list[tuple[str,str]], check_reachable: None|int = None) -> None:
     if action not in ['mount', 'unmount']:
         raise ValueError("action should be one of [mount, unmount]")
     mountjobs = concurrent.futures.ThreadPoolExecutor()
     for netmount in netmounts:
         if action == 'mount':
-            mountjobs.submit(mount, netmount)
+            mountjobs.submit(mount, netmount, check_reachable)
         elif action == 'unmount':
-            mountjobs.submit(unmount, netmount)
+            mountjobs.submit(unmount, netmount, check_reachable)
     mountjobs.shutdown(wait=True)
 
 # check if NetworkManager-dispatcher
@@ -174,17 +177,20 @@ def nm_dispatcher_events():
     else:
         exit()
     
-    # mount based on dispatched event
+    # act based on dispatched event
     if sys.argv[2] in ['up', 'vpn-up']:
-        mounter('mount', [x for x in parse_fstab() if x[0] in hosts])
+        # mount valid hosts and allow 5 retries for checking reachability
+        mounter('mount', [x for x in parse_fstab() if x[0] in hosts], check_reachable=5)
     elif sys.argv[2] in ['pre-down', 'down', 'vpn-pre-down', 'vpn-down']:
-        mounter('unmount', [x for x in parse_fstab() if x[0] in hosts])
+        # unmount valid hosts without checking reachability
+        mounter('unmount', [x for x in parse_fstab() if x[0] in hosts], check_reachable=None)
     exit()
 
 # Events when running directly
 def direct():
-    mounter('mount', [x for x in parse_fstab()])
-    mounter('unmount', [x for x in parse_fstab()])
+    # (un)mount hosts, only check reachability once
+    mounter('mount', [x for x in parse_fstab()], check_reachable=1)
+    mounter('unmount', [x for x in parse_fstab()], check_reachable=1)
     exit()
 
 # create default conf if it doesn't exist
